@@ -132,12 +132,16 @@ function ImprovePanel({
 function FeatureRow({
   product,
   f,
+  active,
+  onSelect,
   onChange,
   onRemove,
   onRewrite,
 }: {
   product: FounderProduct;
   f: Feature;
+  active: boolean;
+  onSelect: () => void;
   onChange: (patch: Partial<Feature>) => void;
   onRemove: () => void;
   onRewrite: (f: Feature, instruction: string) => Promise<Suggestion>;
@@ -153,7 +157,7 @@ function FeatureRow({
   );
 
   return (
-    <div className={`frow ${f.status}`}>
+    <div className={`frow ${f.status} ${active ? "active" : ""}`}>
       <div className="frow-main">
         <input
           type="checkbox"
@@ -162,14 +166,29 @@ function FeatureRow({
           aria-label={`Include ${f.title}`}
           title="Include in the showcase"
         />
-        <button type="button" className="frow-text" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <button
+          type="button"
+          className="frow-text"
+          onClick={() => {
+            setOpen(!open);
+            onSelect();
+          }}
+          aria-expanded={open}
+        >
           <span className="frow-title">{f.title || "Untitled feature"}</span>
           {!open && <span className="frow-desc">{f.description}</span>}
         </button>
         {f.status === "clarify" && <span className="tag warn">Check</span>}
         {f.status === "excluded" && <span className="tag no">Left out</span>}
         {f.origin === "founder" && <span className="tag gray">Yours</span>}
-        <button type="button" className="linkbtn" onClick={() => setOpen(!open)}>
+        <button
+          type="button"
+          className="linkbtn"
+          onClick={() => {
+            setOpen(!open);
+            onSelect();
+          }}
+        >
           {open ? "Close" : "Edit"}
         </button>
       </div>
@@ -402,7 +421,124 @@ function ChecklistList({ items }: { items: CheckItem[] }) {
 
 /* ───────────────────────── the editor ───────────────────────── */
 
+interface Seg {
+  s: number;
+  e: number;
+  covered: boolean;
+  isAct: boolean;
+}
+
+/** Splits a document into runs: used by a feature (blue underline), the selected feature (pink marker), or untouched. */
+function buildSegments(text: string, docId: string, features: Feature[], active: Feature | null): Seg[] {
+  const cuts = new Set<number>([0, text.length]);
+  const ivs: [number, number][] = [];
+  for (const f of features) {
+    if (f.status === "excluded" || !f.source || f.source.docId !== docId) continue;
+    const a = f.source.start;
+    const b = Math.min(f.source.end, text.length);
+    if (b > a) {
+      ivs.push([a, b]);
+      cuts.add(a);
+      cuts.add(b);
+    }
+  }
+  let act: [number, number] | null = null;
+  if (active?.source && active.source.docId === docId) {
+    act = [active.source.start, Math.min(active.source.end, text.length)];
+    cuts.add(act[0]);
+    cuts.add(act[1]);
+  }
+  const pts = Array.from(cuts).sort((x, y) => x - y);
+  const out: Seg[] = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const s = pts[i];
+    const e = pts[i + 1];
+    if (e <= s) continue;
+    out.push({
+      s,
+      e,
+      covered: ivs.some(([a, b]) => a <= s && e <= b),
+      isAct: !!act && act[0] <= s && e <= act[1],
+    });
+  }
+  return out;
+}
+
+/** The founder's document, always visible beside the features. Select a feature and its sentence is highlighted. */
+function DocPanel({ product, active }: { product: FounderProduct; active: Feature | null }) {
+  const [docId, setDocId] = useState("");
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const markRef = useRef<HTMLSpanElement>(null);
+  const docs = product.documents;
+
+  useEffect(() => {
+    if (active?.source?.docId) setDocId(active.source.docId);
+  }, [active?.id, active?.source?.docId]);
+
+  const doc = docs.find((d) => d.id === docId) ?? docs[0];
+  const segs = useMemo(() => (doc ? buildSegments(doc.text, doc.id, product.features, active) : []), [doc, product.features, active]);
+  const firstAct = segs.findIndex((x) => x.isAct);
+
+  useEffect(() => {
+    const box = bodyRef.current;
+    const el = markRef.current;
+    if (box && el) box.scrollTo({ top: Math.max(0, el.offsetTop - box.clientHeight / 3), behavior: "smooth" });
+  }, [active?.id, doc?.id]);
+
+  if (!doc) return null;
+  return (
+    <div className="card docpanel">
+      <div className="dp-head">
+        <h3>Your words</h3>
+        <p className="muted small" style={{ margin: "2px 0 0" }}>
+          {active?.source ? "This is where the selected feature came from." : "Select a feature to see its source here."}
+        </p>
+        {docs.length > 1 && (
+          <select value={doc.id} onChange={(e) => setDocId(e.target.value)} aria-label="Choose a document" style={{ marginTop: 8 }}>
+            {docs.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+      <div className="dp-body" ref={bodyRef}>
+        {segs.map((sg, i) => {
+          const t = doc.text.slice(sg.s, sg.e);
+          if (sg.isAct) {
+            return (
+              <span key={`${active?.id}-${i}`} className="act" ref={i === firstAct ? markRef : undefined}>
+                {t}
+              </span>
+            );
+          }
+          return sg.covered ? (
+            <span key={i} className="cov">
+              {t}
+            </span>
+          ) : (
+            <span key={i}>{t}</span>
+          );
+        })}
+      </div>
+      <div className="dp-legend">
+        <span>
+          <i style={{ background: "var(--cov)", borderBottom: "2px solid rgba(43,91,240,.28)" }} />
+          Used by a feature
+        </span>
+        <span>
+          <i style={{ background: "var(--mark)" }} />
+          Selected
+        </span>
+        <span>Plain text is not in any feature yet</span>
+      </div>
+    </div>
+  );
+}
+
 export default function Editor({ id }: { id: string }) {
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [token, setToken] = useState("");
   const [product, setProduct] = useState<FounderProduct | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -605,9 +741,12 @@ export default function Editor({ id }: { id: string }) {
   const s = product.showcase;
   const isLive = product.status === "published";
   const optionalMissing = checklist.filter((c) => !c.required && !c.ok && ["notFor", "limitations", "diff", "demo", "note"].includes(c.id)).length;
+  const active = product.features.find((f) => f.id === activeId) ?? null;
+  const stepNow = isLive ? 3 : blocked.length ? 1 : 2;
+  const STEPS = ["Upload", "Review", "Approve", "Live"];
 
   return (
-    <div className="narrow-wide">
+    <div className="editor-wrap">
       <div className="row between" style={{ marginBottom: 14 }}>
         <div>
           <div className="muted small">
@@ -624,6 +763,15 @@ export default function Editor({ id }: { id: string }) {
           )}
         </div>
       </div>
+
+      <ol className="stepper" aria-label="Progress">
+        {STEPS.map((label, i) => (
+          <li key={label} className={i < stepNow ? "done" : i === stepNow ? "now" : ""} aria-current={i === stepNow ? "step" : undefined}>
+            <span className="n">{i < stepNow ? "✓" : i + 1}</span>
+            {label}
+          </li>
+        ))}
+      </ol>
 
       {error && <div className="alert err">{error}</div>}
       {notice && !error && <div className="alert ok">{notice}</div>}
@@ -642,6 +790,8 @@ export default function Editor({ id }: { id: string }) {
         </div>
       )}
 
+      <div className="editor-grid">
+        <div className="editor-main">
       {/* STATUS: one glance */}
       <div className="cbar">
         <div className="sentence">{completenessSentence(stats)}</div>
@@ -718,6 +868,8 @@ export default function Editor({ id }: { id: string }) {
                 key={f.id}
                 product={product}
                 f={f}
+                active={activeId === f.id}
+                onSelect={() => setActiveId(f.id)}
                 onChange={(patch) => patchFeature(f.id, patch)}
                 onRemove={() => edit((p) => ({ ...p, features: p.features.filter((x) => x.id !== f.id) }))}
                 onRewrite={rewriteFeature}
@@ -835,6 +987,12 @@ export default function Editor({ id }: { id: string }) {
           <FounderReviews id={id} token={token} live={isLive} />
         </details>
       )}
+
+        </div>
+        <aside className="editor-side">
+          <DocPanel product={product} active={active} />
+        </aside>
+      </div>
 
       <div style={{ height: 70 }} />
       <div className="savebar">
